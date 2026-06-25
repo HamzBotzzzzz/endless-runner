@@ -1,0 +1,240 @@
+name: Build Flutter App from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'ZIP URL dari Telegram'
+        required: true
+        type: string
+      app_name:
+        description: 'Nama Aplikasi'
+        required: true
+        type: string
+      package_name:
+        description: 'Package Name (com.example.app)'
+        required: true
+        type: string
+      icon_url:
+        description: 'URL Icon (512x512 PNG) - Optional'
+        required: false
+        type: string
+      user_id:
+        description: 'Telegram User ID'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+          channel: 'stable'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: Download ZIP dari Telegram
+        run: |
+          echo "📥 Downloading project from Telegram..."
+          wget -q -O project.zip "${{ github.event.inputs.zip_url }}"
+          echo "✅ ZIP downloaded: $(ls -lh project.zip)"
+          
+          echo "📦 Extracting project..."
+          mkdir -p project
+          unzip -q project.zip -d project/
+          echo "✅ Project extracted!"
+          echo "📂 Project structure:"
+          ls -la project/
+
+      - name: Check if ZIP contains Flutter Project
+        run: |
+          echo "🔍 Checking project type..."
+          
+          # Cek apakah ada pubspec.yaml
+          if [ -f "project/pubspec.yaml" ]; then
+            echo "✅ pubspec.yaml found!"
+          else
+            echo "❌ pubspec.yaml NOT found!"
+            echo "📂 Isi ZIP:"
+            ls -la project/
+            exit 1
+          fi
+          
+          # Cek apakah ada folder android/
+          if [ -d "project/android" ]; then
+            echo "✅ android/ folder found! (Full Flutter project)"
+            echo "PROJECT_TYPE=full" >> $GITHUB_ENV
+          else
+            echo "⚠️ android/ folder NOT found! (Only Dart code)"
+            echo "PROJECT_TYPE=code_only" >> $GITHUB_ENV
+          fi
+
+      - name: Create Full Flutter Project (if only code)
+        if: env.PROJECT_TYPE == 'code_only'
+        run: |
+          echo "🏗️ Creating new Flutter project..."
+          flutter create --org com.web2apk temp_project
+          
+          echo "📂 Copying user code to new project..."
+          # Copy lib folder
+          if [ -d "project/lib" ]; then
+            rm -rf temp_project/lib/
+            cp -rf project/lib/ temp_project/lib/
+          fi
+          
+          # Copy assets folder
+          if [ -d "project/assets" ]; then
+            rm -rf temp_project/assets/
+            cp -rf project/assets/ temp_project/assets/
+          fi
+          
+          # Copy pubspec.yaml
+          if [ -f "project/pubspec.yaml" ]; then
+            cp project/pubspec.yaml temp_project/pubspec.yaml
+          fi
+          
+          # Copy analysis_options.yaml
+          if [ -f "project/analysis_options.yaml" ]; then
+            cp project/analysis_options.yaml temp_project/analysis_options.yaml
+          fi
+          
+          # Move to root
+          rm -rf lib/ assets/ pubspec.yaml analysis_options.yaml 2>/dev/null || true
+          cp -rf temp_project/* ./
+          
+          echo "✅ New Flutter project created with user code!"
+
+      - name: Use Full Project (if complete)
+        if: env.PROJECT_TYPE == 'full'
+        run: |
+          echo "📂 Using full project from ZIP..."
+          rm -rf lib/ assets/ pubspec.yaml analysis_options.yaml android/ 2>/dev/null || true
+          cp -rf project/* ./
+          echo "✅ Full project copied!"
+
+      - name: Verify Flutter Project
+        run: |
+          echo "🔍 Verifying Flutter project..."
+          
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml not found!"
+            exit 1
+          fi
+          
+          if [ ! -d "android" ]; then
+            echo "❌ android/ folder not found!"
+            exit 1
+          fi
+          
+          if [ ! -d "lib" ]; then
+            echo "❌ lib/ folder not found!"
+            exit 1
+          fi
+          
+          echo "✅ Flutter project verified!"
+          echo "📂 Contents:"
+          ls -la
+
+      - name: Download Custom Icon
+        if: github.event.inputs.icon_url != ''
+        run: |
+          echo "🖼️ Downloading custom icon..."
+          wget -q -O icon.png "${{ github.event.inputs.icon_url }}"
+          mkdir -p assets
+          cp icon.png assets/icon.png
+          echo "✅ Icon downloaded!"
+
+      - name: Update Package Name
+        run: |
+          PACKAGE="${{ github.event.inputs.package_name }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          
+          echo "📝 Updating package name to: $PACKAGE"
+          
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+            sed -i "s|package=\".*\"|package=\"${PACKAGE}\"|g" android/app/src/main/AndroidManifest.xml
+            sed -i "s|android:label=\".*\"|android:label=\"${APP_NAME}\"|g" android/app/src/main/AndroidManifest.xml
+          fi
+          
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i "s|applicationId .*|applicationId \"${PACKAGE}\"|g" android/app/build.gradle
+          fi
+
+      - name: Install Dependencies
+        run: |
+          echo "📦 Installing dependencies..."
+          flutter pub get
+
+      - name: Run Lints
+        run: |
+          echo "🔍 Running analysis..."
+          if [ -f "analysis_options.yaml" ]; then
+            flutter analyze || echo "⚠️ Lint warnings ignored"
+          else
+            echo "⚠️ No analysis_options.yaml found, skipping lints"
+          fi
+
+      - name: Generate Icons
+        run: |
+          if [ -f "assets/icon.png" ] && [ -s "assets/icon.png" ]; then
+            echo "🖼️ Generating icons..."
+            # Check if flutter_launcher_icons is in pubspec.yaml
+            if grep -q "flutter_launcher_icons" pubspec.yaml; then
+              flutter pub run flutter_launcher_icons || echo "⚠️ Icon generation skipped"
+            else
+              echo "⚠️ flutter_launcher_icons not in pubspec.yaml, skipping"
+            fi
+          fi
+
+      - name: Build APK
+        run: |
+          echo "🔨 Building APK..."
+          flutter build apk --release
+          echo "✅ Build complete!"
+
+      - name: Find and Collect APK
+        run: |
+          echo "🔍 Searching for APK..."
+          APK_PATH=$(find . -name "*.apk" -type f | head -1)
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found!"
+            find . -name "*.apk"
+            exit 1
+          fi
+          
+          echo "✅ Found APK: $APK_PATH"
+          cp "$APK_PATH" "${{ github.event.inputs.app_name }}.apk"
+          APK_SIZE=$(ls -lh "${{ github.event.inputs.app_name }}.apk" | awk '{print $5}')
+          echo "📦 APK Size: $APK_SIZE"
+          echo "APK_SIZE=$APK_SIZE" >> $GITHUB_ENV
+
+      - name: Upload APK to Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}
+          path: "${{ github.event.inputs.app_name }}.apk"
+          retention-days: 7
+
+      - name: Notify Success
+        run: |
+          echo "✅ Build successful for user: ${{ github.event.inputs.user_id }}"
+          echo "📱 App: ${{ github.event.inputs.app_name }}"
+          echo "📦 Size: ${{ env.APK_SIZE }}"
