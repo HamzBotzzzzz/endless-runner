@@ -1,0 +1,233 @@
+name: Build Flutter App from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'ZIP URL dari Telegram'
+        required: true
+        type: string
+      app_name:
+        description: 'Nama Aplikasi'
+        required: true
+        type: string
+      package_name:
+        description: 'Package Name (com.example.app)'
+        required: true
+        type: string
+      icon_url:
+        description: 'URL Icon (512x512 PNG) - Optional'
+        required: false
+        type: string
+      user_id:
+        description: 'Telegram User ID'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+          channel: 'stable'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      # ==================== DOWNLOAD & EXTRACT ZIP ====================
+      - name: Download ZIP dari Telegram
+        run: |
+          echo "📥 Downloading project from Telegram..."
+          wget -q -O project.zip "${{ github.event.inputs.zip_url }}"
+          echo "✅ ZIP downloaded: $(ls -lh project.zip)"
+          
+          echo "📦 Extracting project..."
+          mkdir -p project
+          unzip -q project.zip -d project/
+          echo "✅ Project extracted!"
+          echo "📂 Project structure:"
+          ls -la project/
+
+      # ==================== COPAS PROJECT ====================
+      - name: Copy Project Files
+        run: |
+          echo "📂 Copying project files..."
+          
+          # Hapus file default (kecuali .github)
+          rm -rf lib/ assets/ pubspec.yaml analysis_options.yaml android/ 2>/dev/null || true
+          
+          # Copas semua file dari ZIP ke root
+          cp -rf project/* ./
+          
+          echo "✅ Project files copied!"
+          echo "📂 Root structure:"
+          ls -la
+
+      # ==================== CHECK PROJECT ====================
+      - name: Verify Flutter Project
+        run: |
+          echo "🔍 Verifying Flutter project..."
+          
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml not found!"
+            echo "📂 Isi root:"
+            ls -la
+            exit 1
+          fi
+          
+          if [ ! -d "lib" ]; then
+            echo "❌ lib/ folder not found!"
+            exit 1
+          fi
+          
+          if [ ! -d "android" ]; then
+            echo "⚠️ android/ folder not found! Creating new project..."
+            flutter create --org com.web2apk temp_project
+            cp -rf temp_project/android ./
+            cp -rf temp_project/ios ./ 2>/dev/null || true
+          fi
+          
+          echo "✅ Flutter project verified!"
+
+      # ==================== CUSTOM ICON ====================
+      - name: Download Custom Icon
+        if: github.event.inputs.icon_url != ''
+        run: |
+          echo "🖼️ Downloading custom icon..."
+          wget -q -O icon.png "${{ github.event.inputs.icon_url }}"
+          mkdir -p assets
+          cp icon.png assets/icon.png
+          
+          # Tambahkan flutter_launcher_icons ke pubspec.yaml
+          if ! grep -q "flutter_launcher_icons" pubspec.yaml; then
+            echo "  flutter_launcher_icons: ^0.13.1" >> pubspec.yaml
+          fi
+          
+          # Generate icon config
+          cat > flutter_launcher_icons.yaml << EOF
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon.png"
+            adaptive_icon_background: "#1a1a2e"
+            adaptive_icon_foreground: "assets/icon.png"
+          EOF
+          
+          echo "✅ Icon downloaded!"
+
+      # ==================== UPDATE PACKAGE NAME ====================
+      - name: Update Package Name
+        run: |
+          PACKAGE="${{ github.event.inputs.package_name }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          
+          echo "📝 Updating package name to: $PACKAGE"
+          echo "📝 App name: $APP_NAME"
+          
+          # Update AndroidManifest.xml
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+            sed -i "s|package=\".*\"|package=\"${PACKAGE}\"|g" android/app/src/main/AndroidManifest.xml
+            sed -i "s|android:label=\".*\"|android:label=\"${APP_NAME}\"|g" android/app/src/main/AndroidManifest.xml
+            echo "✅ AndroidManifest.xml updated!"
+          fi
+          
+          # Update build.gradle
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i "s|applicationId .*|applicationId \"${PACKAGE}\"|g" android/app/build.gradle
+            echo "✅ build.gradle updated!"
+          fi
+
+      # ==================== FIX ANDROID SDK ====================
+      - name: Fix Android SDK Version
+        run: |
+          echo "🔧 Fixing Android SDK version..."
+          
+          if [ -f "android/app/build.gradle" ]; then
+            # Force SDK 34
+            sed -i 's/compileSdkVersion [0-9]*/compileSdkVersion 34/g' android/app/build.gradle
+            sed -i 's/targetSdkVersion [0-9]*/targetSdkVersion 34/g' android/app/build.gradle
+            sed -i 's/minSdkVersion [0-9]*/minSdkVersion 21/g' android/app/build.gradle
+            echo "✅ build.gradle fixed to SDK 34!"
+          fi
+
+      # ==================== INSTALL DEPENDENCIES ====================
+      - name: Install Dependencies
+        run: |
+          echo "📦 Installing dependencies..."
+          flutter pub get
+
+      # ==================== RUN LINTS ====================
+      - name: Run Lints
+        run: |
+          echo "🔍 Running analysis..."
+          if [ -f "analysis_options.yaml" ]; then
+            flutter analyze || echo "⚠️ Lint warnings ignored"
+          else
+            echo "⚠️ No analysis_options.yaml found, skipping lints"
+          fi
+
+      # ==================== GENERATE ICONS ====================
+      - name: Generate Icons
+        run: |
+          if [ -f "assets/icon.png" ] && [ -s "assets/icon.png" ]; then
+            echo "🖼️ Generating icons..."
+            if grep -q "flutter_launcher_icons" pubspec.yaml; then
+              flutter pub run flutter_launcher_icons || echo "⚠️ Icon generation skipped"
+            fi
+          fi
+
+      # ==================== BUILD APK ====================
+      - name: Build APK
+        run: |
+          echo "🔨 Building APK..."
+          flutter build apk --release
+          echo "✅ Build complete!"
+
+      # ==================== FIND & COLLECT APK ====================
+      - name: Find and Collect APK
+        run: |
+          echo "🔍 Searching for APK..."
+          APK_PATH=$(find . -name "*.apk" -type f | head -1)
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found!"
+            find . -name "*.apk"
+            exit 1
+          fi
+          
+          echo "✅ Found APK: $APK_PATH"
+          cp "$APK_PATH" "${{ github.event.inputs.app_name }}.apk"
+          APK_SIZE=$(ls -lh "${{ github.event.inputs.app_name }}.apk" | awk '{print $5}')
+          echo "📦 APK Size: $APK_SIZE"
+          echo "APK_SIZE=$APK_SIZE" >> $GITHUB_ENV
+
+      # ==================== UPLOAD APK ====================
+      - name: Upload APK to Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}
+          path: "${{ github.event.inputs.app_name }}.apk"
+          retention-days: 7
+
+      # ==================== NOTIFY ====================
+      - name: Notify Success
+        run: |
+          echo "✅ Build successful for user: ${{ github.event.inputs.user_id }}"
+          echo "📱 App: ${{ github.event.inputs.app_name }}"
+          echo "📦 Size: ${{ env.APK_SIZE }}"
